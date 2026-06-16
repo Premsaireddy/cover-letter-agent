@@ -1,6 +1,7 @@
 import re
 from io import BytesIO
 
+import os
 import streamlit as st
 from dotenv import load_dotenv
 from docx import Document
