@@ -8,8 +8,13 @@ from openai import OpenAI
 from pypdf import PdfReader
 
 load_dotenv()
-client = OpenAI()
 
+try:
+    api_key = st.secrets["OPENAI_API_KEY"]
+except (KeyError, FileNotFoundError):
+    api_key = os.getenv("OPENAI_API_KEY")
+
+client = OpenAI(api_key=api_key)
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AI Cover Letter Agent", page_icon="📝")
 st.title("AI Cover Letter Agent")
