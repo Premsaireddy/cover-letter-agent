@@ -1,5 +1,9 @@
 import re
 from io import BytesIO
+<<<<<<< HEAD
+=======
+
+>>>>>>> 3739068cb7001a45761f34e25020b140149ccc75
 import os
 import streamlit as st
 from dotenv import load_dotenv
@@ -8,6 +12,7 @@ from openai import OpenAI
 from pypdf import PdfReader
 
 load_dotenv()
+<<<<<<< HEAD
 
 try:
     api_key = st.secrets["OPENAI_API_KEY"]
@@ -15,7 +20,15 @@ except (KeyError, FileNotFoundError):
     api_key = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=api_key)
+=======
+>>>>>>> 3739068cb7001a45761f34e25020b140149ccc75
 
+try:
+    api_key = st.secrets["OPENAI_API_KEY"]
+except (KeyError, FileNotFoundError):
+    api_key = os.getenv("OPENAI_API_KEY")
+
+client = OpenAI(api_key=api_key)
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AI Cover Letter Agent", page_icon="📝")
 st.title("AI Cover Letter Agent")
