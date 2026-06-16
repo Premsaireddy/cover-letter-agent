@@ -10,37 +10,35 @@ from pypdf import PdfReader
 load_dotenv()
 client = OpenAI()
 
+# ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AI Cover Letter Agent", page_icon="📝")
-
 st.title("AI Cover Letter Agent")
-st.write("Upload your CV, paste a job description, and the agent will draft, critique, and improve your cover letter.")
+st.write(
+    "Upload your CV, paste a job description, and the agent will autonomously "
+    "decide how to draft, critique, and improve your cover letter."
+)
 
 uploaded_cv = st.file_uploader("Upload your CV", type=["pdf", "docx"])
 job_description = st.text_area("Paste the job description", height=280)
 
 
-# --- BACKEND LOGIC FUNCTIONS ---
+# ── File extraction ─────────────────────────────────────────────────────────────
 
 def extract_pdf_text(pdf_file):
     reader = PdfReader(pdf_file)
-    text = ""
-    for page in reader.pages:
-        page_text = page.extract_text()
-        if page_text:
-            text += page_text + "\n"
-    return text
+    return "\n".join(p.extract_text() for p in reader.pages if p.extract_text())
 
 
 def extract_docx_text(docx_file):
     doc = Document(docx_file)
-    text = ""
-    for paragraph in doc.paragraphs:
-        if paragraph.text.strip():
-            text += paragraph.text + "\n"
-    return text
+    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
 
-def ask_ai(prompt):
+# ── Content generation (LLM does the actual writing / critiquing) ───────────────
+# These are NOT the agent — they are tools the agent calls to get work done.
+
+def llm_generate(prompt):
+    """Calls o3-mini for content generation tasks (writing, critiquing, improving)."""
     response = client.chat.completions.create(
         model="o3-mini",
         messages=[{"role": "user", "content": prompt}]
@@ -48,8 +46,8 @@ def ask_ai(prompt):
     return response.choices[0].message.content
 
 
-def write_first_draft(cv_text, job_description):
-    prompt = f"""
+def _write_draft(cv_text, job_description):
+    return llm_generate(f"""
 You are an expert cover letter writer.
 Write a tailored cover letter using the CV and job description below.
 
@@ -66,12 +64,11 @@ CV:
 
 Job Description:
 {job_description}
-"""
-    return ask_ai(prompt)
+""")
 
 
-def critique_cover_letter(cv_text, job_description, cover_letter):
-    prompt = f"""
+def _critique_draft(cv_text, job_description, draft):
+    return llm_generate(f"""
 You are a strict recruiter reviewing a cover letter.
 Score it out of 10 by averaging these six criteria (each worth up to 1-2 points):
 1. Relevance to the job description
@@ -96,13 +93,12 @@ Job Description:
 {job_description}
 
 Cover Letter:
-{cover_letter}
-"""
-    return ask_ai(prompt)
+{draft}
+""")
 
 
-def improve_cover_letter(cv_text, job_description, cover_letter, critique, score, target_score):
-    prompt = f"""
+def _improve_draft(cv_text, job_description, draft, critique, score, target_score):
+    return llm_generate(f"""
 You are an expert cover letter writer.
 The previous cover letter scored {score}/10. The target is {target_score}/10.
 Improve it by carefully addressing every point in the recruiter's feedback below.
@@ -122,20 +118,218 @@ Job Description:
 {job_description}
 
 Original Cover Letter:
-{cover_letter}
+{draft}
 
 Recruiter Feedback:
 {critique}
-"""
-    return ask_ai(prompt)
+""")
 
 
 def extract_score(critique_text):
     match = re.search(r"Score:\s*(\d+(?:\.\d+)?)\s*/\s*10", critique_text, re.IGNORECASE)
-    if match:
-        return float(match.group(1))
-    return 0
+    return float(match.group(1)) if match else 0.0
 
+
+# ── Tool schema (what the agent sees and reasons over) ─────────────────────────
+# The agent (gpt-4o) reads these descriptions and DECIDES which tool to call next.
+# This is the core of what makes it agentic — the LLM is the decision-maker.
+
+AGENT_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "write_draft",
+            "description": (
+                "Write the very first draft of the cover letter from the CV and job description. "
+                "Always call this tool first before anything else."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "critique_draft",
+            "description": (
+                "Score and critique the current cover letter draft out of 10 with specific feedback. "
+                "Call this after writing or improving a draft to evaluate quality."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "improve_draft",
+            "description": (
+                "Revise and improve the current draft based on the latest critique feedback. "
+                "Only call this if the current score is below the target (8/10) "
+                "AND fewer than 3 improvement attempts have been made."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "finalize",
+            "description": (
+                "Mark the cover letter as complete and ready to submit. "
+                "Call this when the score reaches 8/10 or above, "
+                "OR when 3 improvement attempts have been exhausted."
+            ),
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    }
+]
+
+
+# ── Tool executor (runs the actual work when the agent picks a tool) ────────────
+
+def execute_tool(tool_name, state, status_box):
+    """
+    Executes whichever tool the agent decided to call.
+    Updates shared state and returns a result string fed back to the agent.
+    """
+    if tool_name == "write_draft":
+        status_box.info("✍️ Agent → write_draft: Writing first draft...")
+        draft = _write_draft(state["cv_text"], state["job_description"])
+        state["current_draft"] = draft
+        return f"Draft written. Word count: {len(draft.split())} words."
+
+    elif tool_name == "critique_draft":
+        status_box.info("🕵️ Agent → critique_draft: Evaluating current draft...")
+        critique = _critique_draft(
+            state["cv_text"], state["job_description"], state["current_draft"]
+        )
+        score = extract_score(critique)
+        state["current_critique"] = critique
+        state["current_score"] = score
+        state["attempts_log"].append({
+            "attempt": len(state["attempts_log"]) + 1,
+            "score": score,
+            "critique": critique
+        })
+        return (
+            f"Critique complete. Score: {score}/10. "
+            f"Improvement attempts used so far: {state['improvement_attempts']}/{state['max_attempts']}."
+        )
+
+    elif tool_name == "improve_draft":
+        state["improvement_attempts"] += 1
+        status_box.warning(
+            f"⚠️ Agent → improve_draft: Score was {state['current_score']}/10. "
+            f"Revising (attempt {state['improvement_attempts']}/{state['max_attempts']})..."
+        )
+        improved = _improve_draft(
+            state["cv_text"],
+            state["job_description"],
+            state["current_draft"],
+            state["current_critique"],
+            state["current_score"],
+            state["target_score"]
+        )
+        state["current_draft"] = improved
+        return (
+            f"Draft improved. "
+            f"{state['improvement_attempts']} of {state['max_attempts']} attempts used."
+        )
+
+    elif tool_name == "finalize":
+        state["finalized"] = True
+        if state["current_score"] >= state["target_score"]:
+            status_box.success(
+                f"🎉 Agent → finalize: Target reached ({state['current_score']}/10). Cover letter ready."
+            )
+        else:
+            status_box.error(
+                f"🛑 Agent → finalize: Max attempts exhausted. Best score: {state['current_score']}/10."
+            )
+        return "Cover letter finalized and ready for download."
+
+    return f"Unknown tool called: {tool_name}"
+
+
+# ── Agent loop (THIS is the agentic part) ──────────────────────────────────────
+# gpt-4o acts as the agent brain. It reads the tool descriptions + conversation
+# history and DECIDES which tool to call next. There are no Python if-statements
+# controlling the flow — the LLM is the decision-maker at every step.
+
+def run_agent(cv_text, job_description, status_box):
+    state = {
+        "cv_text": cv_text,
+        "job_description": job_description,
+        "current_draft": "",
+        "current_critique": "",
+        "current_score": 0.0,
+        "improvement_attempts": 0,
+        "max_attempts": 3,
+        "target_score": 8,
+        "attempts_log": [],
+        "finalized": False
+    }
+
+    # System prompt gives the agent its goal and decision rules.
+    # Crucially, the agent REASONS about these — they are not enforced by code.
+    system_prompt = f"""
+You are an autonomous Cover Letter Agent. Your sole goal is to produce the best
+possible cover letter for a job applicant by reasoning and using your tools.
+
+Tools available to you:
+- write_draft     → Always call this first to produce an initial draft.
+- critique_draft  → Call after writing or improving to get a score and feedback.
+- improve_draft   → Call if the score is below {state['target_score']}/10 and you have used fewer than {state['max_attempts']} improvement attempts.
+- finalize        → Call when the score reaches {state['target_score']}/10 or above, OR when {state['max_attempts']} improvement attempts have been exhausted.
+
+You reason about which tool to call at every step. You are the decision-maker.
+The tool result will always tell you the current score and how many attempts remain.
+"""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": (
+                "Begin. Autonomously produce the best possible cover letter "
+                "for this candidate using your tools."
+            )
+        }
+    ]
+
+    safety_limit = 12  # Prevents runaway loops in edge cases
+
+    for _ in range(safety_limit):
+        if state["finalized"]:
+            break
+
+        # The agent (gpt-4o) looks at the full conversation + tool results so far
+        # and decides on its own which tool to call next.
+        response = client.chat.completions.create(
+            model="gpt-4o",          # Agent brain: reasons and picks tools
+            messages=messages,
+            tools=AGENT_TOOLS,
+            tool_choice="required"   # Agent must always pick a tool (keeps loop clean)
+        )
+
+        agent_message = response.choices[0].message
+        messages.append(agent_message)
+
+        if not agent_message.tool_calls:
+            break  # Safety exit (shouldn't happen with tool_choice="required")
+
+        # Execute every tool the agent chose and feed results back into the conversation
+        for tool_call in agent_message.tool_calls:
+            result = execute_tool(tool_call.function.name, state, status_box)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result
+            })
+
+    return state
+
+
+# ── DOCX export ────────────────────────────────────────────────────────────────
 
 def create_docx(text):
     doc = Document()
@@ -149,13 +343,12 @@ def create_docx(text):
     return buffer
 
 
-# --- AGENT EXECUTION TRIGGER ---
+# ── UI trigger ─────────────────────────────────────────────────────────────────
 
 if st.button("Generate Cover Letter"):
     if uploaded_cv is None:
         st.error("Please upload your CV as PDF or DOCX.")
         st.stop()
-
     if not job_description.strip():
         st.error("Please paste the job description.")
         st.stop()
@@ -173,69 +366,27 @@ if st.button("Generate Cover Letter"):
         st.error("Could not read your CV. Please check the file.")
         st.stop()
 
-    target_score = 8
-    max_attempts = 3
-    attempts_log = []
-
-    # Dynamic status container to show the agent thinking
     status_box = st.empty()
+    final_state = run_agent(cv_text, job_description, status_box)
 
-    status_box.info("🤖 Agent is writing the first draft...")
-    current_letter = write_first_draft(cv_text, job_description)
-
-    for attempt in range(1, max_attempts + 1):
-        status_box.info(f"🕵️‍♂️ Recruiter Agent is reviewing attempt {attempt}...")
-        critique = critique_cover_letter(
-            cv_text=cv_text,
-            job_description=job_description,
-            cover_letter=current_letter
-        )
-
-        score = extract_score(critique)
-        attempts_log.append({
-            "attempt": attempt,
-            "score": score,
-            "critique": critique
-        })
-
-        if score >= target_score:
-            status_box.success(f"🎉 Success! Target score reached ({score}/10) on attempt {attempt}.")
-            break
-
-        if attempt < max_attempts:
-            status_box.warning(f"⚠️ Score was {score}/10. Agent is executing a revision loop...")
-            current_letter = improve_cover_letter(
-                cv_text=cv_text,
-                job_description=job_description,
-                cover_letter=current_letter,
-                critique=critique,
-                score=score,
-                target_score=target_score
-            )
-        else:
-            status_box.error(f"🛑 Reached maximum loops ({max_attempts}). Outputting best version.")
-
-    # Save results to session state so they survive the Streamlit rerun cycle
-    st.session_state['final_letter'] = current_letter
-    st.session_state['attempts_log'] = attempts_log
+    st.session_state["final_letter"] = final_state["current_draft"]
+    st.session_state["attempts_log"] = final_state["attempts_log"]
 
 
-# --- RENDER RESULTS (Outside the button condition block) ---
+# ── Results ────────────────────────────────────────────────────────────────────
 
-if 'final_letter' in st.session_state:
-    st.subheader("Agent Iteration Log")
-    for item in st.session_state['attempts_log']:
+if "final_letter" in st.session_state:
+    st.subheader("Agent Decision Log")
+    for item in st.session_state["attempts_log"]:
         with st.expander(f"Attempt {item['attempt']} — Score: {item['score']}/10"):
             st.write(item["critique"])
 
     st.subheader("Final Cover Letter")
-    st.write(st.session_state['final_letter'])
-
-    docx_file = create_docx(st.session_state['final_letter'])
+    st.write(st.session_state["final_letter"])
 
     st.download_button(
         label="Download Cover Letter as DOCX",
-        data=docx_file,
+        data=create_docx(st.session_state["final_letter"]),
         file_name="cover_letter.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
