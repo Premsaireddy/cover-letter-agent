@@ -305,7 +305,7 @@ The tool result will always tell you the current score and how many attempts rem
         # The agent (gpt-4o) looks at the full conversation + tool results so far
         # and decides on its own which tool to call next.
         response = client.chat.completions.create(
-            model="gpt-4o",          # Agent brain: reasons and picks tools
+            model="o3-mini",          # Agent brain: reasons and picks tools
             messages=messages,
             tools=AGENT_TOOLS,
             tool_choice="required"   # Agent must always pick a tool (keeps loop clean)
