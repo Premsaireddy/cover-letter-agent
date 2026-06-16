@@ -1,6 +1,6 @@
 import re
 from io import BytesIO
-
+import os
 import streamlit as st
 from dotenv import load_dotenv
 from docx import Document
@@ -8,7 +8,13 @@ from openai import OpenAI
 from pypdf import PdfReader
 
 load_dotenv()
-client = OpenAI()
+
+try:
+    api_key = st.secrets["OPENAI_API_KEY"]
+except (KeyError, FileNotFoundError):
+    api_key = os.getenv("OPENAI_API_KEY")
+
+client = OpenAI(api_key=api_key)
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="AI Cover Letter Agent", page_icon="📝")
@@ -305,7 +311,7 @@ The tool result will always tell you the current score and how many attempts rem
         # The agent (gpt-4o) looks at the full conversation + tool results so far
         # and decides on its own which tool to call next.
         response = client.chat.completions.create(
-            model="gpt-4o",          # Agent brain: reasons and picks tools
+            model="o3-mini",          # Agent brain: reasons and picks tools
             messages=messages,
             tools=AGENT_TOOLS,
             tool_choice="required"   # Agent must always pick a tool (keeps loop clean)
